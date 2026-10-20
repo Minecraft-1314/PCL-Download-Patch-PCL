@@ -1,0 +1,28 @@
+[package]
+name = "pcl-download-patch"
+version = "0.1.0"
+edition = "2021"
+description = "Restore the removed vanilla Minecraft download page in Plain Craft Launcher 2"
+license = "MIT"
+default-run = "PCLPatch"
+
+[lib]
+name = "pcl_download_patch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "PCLPatch"
+path = "src/main.rs"
+
+[dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_Globalization",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

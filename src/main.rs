@@ -5,12 +5,18 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 
 use pcl_download_patch::{
-    apply_patch, backup_path, ensure_backup, identify, load_lang, messages, restore, save_lang,
-    state_of, state_message, system_lang, write_atomic, Identification, Lang, Messages,
-    PatchState,
+    apply_patch, backup_path, ensure_backup, identify, load_lang, load_recent, messages,
+    restore, save_lang, save_recent, state_of, state_message, system_lang, write_atomic,
+    Identification, Lang, Messages, PatchState,
 };
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const ILPATCH_APPHOST: &[u8] = include_bytes!("embedded/ilpatch.exe");
+const ILPATCH_ASSEMBLY: &[u8] = include_bytes!("embedded/ilpatch.dll");
+const ILPATCH_DEPS: &[u8] = include_bytes!("embedded/ilpatch.deps.json");
+const ILPATCH_RUNTIMECONFIG: &[u8] = include_bytes!("embedded/ilpatch.runtimeconfig.json");
+const DNLIB_ASSEMBLY: &[u8] = include_bytes!("embedded/dnlib.dll");
 
 const HELP_ZH: &str = "\
 PCL Download Patch - 恢复 PCL2 被移除的「下载原版游戏」功能
@@ -103,6 +109,7 @@ const COLOR_DIM: u16 = 0x08;
 fn state_color(state: PatchState) -> u16 {
     match state {
         PatchState::Patched => COLOR_OK,
+        PatchState::Partial => COLOR_WARN,
         PatchState::Restricted => COLOR_WARN,
         PatchState::Unknown => COLOR_ERROR,
     }
@@ -329,12 +336,19 @@ fn resolve_target(arg: Option<&String>, m: &Messages, silent: bool) -> Option<Pa
         }
         return Some(path);
     }
+    if let Some(recent) = load_recent(&exe_dir()) {
+        return Some(recent);
+    }
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let self_path = env::current_exe().ok();
     let mut best: Option<(PathBuf, u32)> = None;
     let mut tie = false;
     if let Ok(entries) = fs::read_dir(&cwd) {
         for entry in entries.flatten() {
             let path = entry.path();
+            if Some(&path) == self_path.as_ref() {
+                continue;
+            }
             let is_exe = path
                 .extension()
                 .and_then(|ext| ext.to_str())
@@ -397,6 +411,9 @@ fn execute_status(target: &Path, lang: Lang) -> i32 {
     with_color(COLOR_OK, || {
         println!("{}", m.identify_ok.replace("{}", &id.reasons.len().to_string()));
     });
+    if let Some(v) = id.version {
+        println!("{}", m.identify_version.replace("{}", v));
+    }
     let state = state_of(&data);
     with_color(state_color(state), || {
         println!("{}", m.state.replace("{}", state_message(state, lang)));
@@ -422,12 +439,16 @@ fn execute_patch(target: &Path, lang: Lang) -> i32 {
         return 1;
     }
     println!("{}", m.target.replace("{}", &target.display().to_string()));
+    if let Some(v) = id.version {
+        println!("{}", m.identify_version.replace("{}", v));
+    }
     let state = state_of(&data);
     with_color(state_color(state), || {
         println!("{}", m.state.replace("{}", state_message(state, lang)));
     });
     if state == PatchState::Patched {
         println!("{}", m.skip_patched);
+        run_ilpatch_if_present(target, &m);
         return 0;
     }
     let mut staged = data.clone();
@@ -453,7 +474,65 @@ fn execute_patch(target: &Path, lang: Lang) -> i32 {
         return 1;
     }
     with_color(COLOR_OK, || println!("{}", m.patch_done));
+    run_ilpatch_if_present(target, &m);
     0
+}
+
+fn run_ilpatch_if_present(target: &Path, m: &Messages) {
+    let staging = match stage_ilpatch() {
+        Ok(d) => d,
+        Err(e) => {
+            with_color(COLOR_ERROR, || {
+                println!("{} ilpatch stage: {}", m.fail_tag, e);
+            });
+            return;
+        }
+    };
+    let temp_out = target.with_extension("exe.ilpatch_tmp");
+    let run = std::process::Command::new(staging.join("ilpatch.exe"))
+        .arg(target)
+        .arg(&temp_out)
+        .output();
+    match run {
+        Ok(out) if out.status.success() => {
+            if let Err(e) = std::fs::rename(&temp_out, target) {
+                with_color(COLOR_ERROR, || {
+                    println!("{} ilpatch rename: {}", m.fail_tag, e);
+                });
+            } else {
+                with_color(COLOR_OK, || println!("{}", m.ilpatch_done));
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let detail = if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() };
+            with_color(COLOR_ERROR, || {
+                println!("{} {}", m.fail_tag, detail);
+            });
+        }
+        Err(e) => {
+            println!("{} ilpatch: {}", m.fail_tag, e);
+        }
+    }
+    let _ = std::fs::remove_file(&temp_out);
+    let _ = std::fs::remove_dir_all(&staging);
+}
+
+fn stage_ilpatch() -> Result<PathBuf, String> {
+    let dir = env::temp_dir().join(format!("PclPatch-ilpatch-{}", std::process::id()));
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let files: [(&str, &[u8]); 5] = [
+        ("ilpatch.exe", ILPATCH_APPHOST),
+        ("ilpatch.dll", ILPATCH_ASSEMBLY),
+        ("ilpatch.deps.json", ILPATCH_DEPS),
+        ("ilpatch.runtimeconfig.json", ILPATCH_RUNTIMECONFIG),
+        ("dnlib.dll", DNLIB_ASSEMBLY),
+    ];
+    for (name, data) in files {
+        fs::write(dir.join(name), data).map_err(|e| e.to_string())?;
+    }
+    Ok(dir)
 }
 
 fn execute_restore(target: &Path, lang: Lang) -> i32 {
@@ -471,6 +550,9 @@ fn execute_restore(target: &Path, lang: Lang) -> i32 {
         return 1;
     }
     println!("{}", m.target.replace("{}", &target.display().to_string()));
+    if let Some(v) = id.version {
+        println!("{}", m.identify_version.replace("{}", v));
+    }
     let state = state_of(&data);
     with_color(state_color(state), || {
         println!("{}", m.state.replace("{}", state_message(state, lang)));
@@ -507,6 +589,9 @@ fn run_command(args: &[String], lang: Lang) -> i32 {
         Some(target) => target,
         None => return 1,
     };
+    if path_arg.is_some() {
+        save_recent(&exe_dir(), &target);
+    }
     match command {
         "patch" => execute_patch(&target, lang),
         "restore" => execute_restore(&target, lang),
@@ -532,6 +617,9 @@ fn render_menu(
             with_color(COLOR_OK, || {
                 println!("{}", m.identify_ok.replace("{}", &id.reasons.len().to_string()));
             });
+            if let Some(v) = id.version {
+                println!("{}", m.identify_version.replace("{}", v));
+            }
             if let Some(state) = state {
                 with_color(state_color(state), || {
                     println!("{}", m.state.replace("{}", state_message(state, lang)));
@@ -544,6 +632,7 @@ fn render_menu(
                     || {
                         let hint = match state {
                             PatchState::Restricted => m.hint_restricted,
+                            PatchState::Partial => m.hint_partial,
                             PatchState::Patched => m.hint_patched,
                             PatchState::Unknown => m.hint_pcl_mismatch,
                         };
@@ -624,7 +713,10 @@ fn run_menu(mut lang: Lang, preset: Option<PathBuf>) {
 
     if let Some(path) = preset {
         match validate_target(&path) {
-            Some(id) => chosen = Some((path, id)),
+            Some(id) => {
+                save_recent(&dir, &path);
+                chosen = Some((path, id));
+            }
             None => {
                 println!("{}", messages(lang).err_not_pcl);
                 pause_menu(&mut raw, messages(lang));
@@ -717,7 +809,10 @@ fn run_menu(mut lang: Lang, preset: Option<PathBuf>) {
                                     continue;
                                 }
                                 match validate_target(&path) {
-                                    Some(id) => chosen = Some((path, id)),
+                                    Some(id) => {
+                                        save_recent(&dir, &path);
+                                        chosen = Some((path, id));
+                                    }
                                     None => {
                                         println!("{}", m.err_not_pcl);
                                         if !pause_menu(&mut raw, m) {

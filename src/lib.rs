@@ -43,9 +43,19 @@ pub const TAIL: [u8; 20] = [
 pub const DEFAULT_EXE: &str = "Plain Craft Launcher 2.exe";
 pub const LANG_FILE_NAME: &str = "PCLPatch.lang";
 
+pub mod meta;
+pub mod patcher;
+
+fn analyze(data: &[u8]) -> Result<(meta::CliImage, patcher::ScanResult), String> {
+    let img = meta::CliImage::parse(data.to_vec())?;
+    let scan = patcher::scan(&img);
+    Ok((img, scan))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PatchState {
     Restricted,
+    Partial,
     Patched,
     Unknown,
 }
@@ -96,7 +106,7 @@ pub fn lang_file_path(dir: &Path) -> PathBuf {
 
 pub fn load_lang(dir: &Path) -> Option<Lang> {
     let text = fs::read_to_string(lang_file_path(dir)).ok()?;
-    Lang::parse(&text)
+    Lang::parse(text.lines().next().unwrap_or(""))
 }
 
 pub fn save_lang(dir: &Path, lang: Lang) -> bool {
@@ -104,13 +114,58 @@ pub fn save_lang(dir: &Path, lang: Lang) -> bool {
         Lang::Zh => "zh",
         Lang::En => "en",
     };
-    fs::write(lang_file_path(dir), text).is_ok()
+    let existing = fs::read_to_string(lang_file_path(dir)).ok();
+    let mut lines: Vec<String> = existing
+        .map(|content| content.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+    if lines.is_empty() {
+        lines.push(text.to_string());
+    } else {
+        lines[0] = text.to_string();
+    }
+    fs::write(lang_file_path(dir), lines.join("\n")).is_ok()
+}
+
+pub fn load_recent(dir: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(lang_file_path(dir)).ok()?;
+    let line = text.lines().nth(1)?.trim().to_string();
+    if line.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(line);
+    if !path.is_file() {
+        return None;
+    }
+    if Some(&path) == std::env::current_exe().ok().as_ref() {
+        return None;
+    }
+    Some(path)
+}
+
+pub fn save_recent(dir: &Path, path: &Path) {
+    let file = lang_file_path(dir);
+    let mut lines: Vec<String> = fs::read_to_string(&file)
+        .map(|content| content.lines().map(|l| l.to_string()).collect())
+        .unwrap_or_default();
+    if lines.is_empty() {
+        lines.push("zh".to_string());
+    }
+    let value = path.to_string_lossy().into_owned();
+    if lines.len() > 1 {
+        lines[1] = value;
+    } else {
+        lines.push(value);
+    }
+    let _ = fs::write(&file, lines.join("\n"));
 }
 
 pub struct Messages {
     pub fail_tag: &'static str,
     pub target: &'static str,
     pub state: &'static str,
+    pub ilpatch_start: &'static str,
+    pub ilpatch_done: &'static str,
+    pub state_partial: &'static str,
     pub state_patched: &'static str,
     pub state_restricted: &'static str,
     pub state_unknown: &'static str,
@@ -149,11 +204,13 @@ pub struct Messages {
     pub backup_yes: &'static str,
     pub backup_no: &'static str,
     pub hint_restricted: &'static str,
+    pub hint_partial: &'static str,
     pub hint_patched: &'static str,
     pub hint_unknown: &'static str,
     pub controls_raw: &'static str,
     pub controls_line: &'static str,
     pub identify_ok: &'static str,
+    pub identify_version: &'static str,
     pub err_not_pcl: &'static str,
     pub err_damaged: &'static str,
     pub hint_pcl_mismatch: &'static str,
@@ -163,6 +220,9 @@ pub const ZH: Messages = Messages {
     fail_tag: "[失败]",
     target: "目标文件: {}",
     state: "当前状态: {}",
+    ilpatch_start: "正在执行整合包安装流程恢复...",
+    ilpatch_done: "整合包安装流程已恢复",
+    state_partial: "部分已补丁（存在待恢复的新补丁点）",
     state_patched: "已打补丁（下载功能已恢复）",
     state_restricted: "受限制（原版行为）",
     state_unknown: "无法识别（可能不是适配的 PCL 版本）",
@@ -181,7 +241,7 @@ pub const ZH: Messages = Messages {
     no_pcl: "未找到 PCL 主程序：请把 PCLPatch.exe 放进 PCL 目录后运行，或用参数指定路径",
     multi_pcl: "当前目录存在多个 PCL 主程序，请用参数明确指定路径",
     err_io: "文件读写错误: {}",
-    err_not_found: "未找到适配的特征块：当前 PCL 版本可能不受支持，或官方已更新该处实现",
+    err_not_found: "未找到适配的特征块：本工具支持 PCL 2.99.0.0 与 2.99.0.1 正式版，当前文件可能为其他版本，或官方已更新该处实现",
     err_ambiguous: "特征块出现多次，为安全起见拒绝修改",
     err_already_patched: "已经是补丁状态",
     err_already_original: "已经是原版状态",
@@ -201,11 +261,13 @@ pub const ZH: Messages = Messages {
     backup_yes: "已存在",
     backup_no: "无（首次打补丁时自动创建）",
     hint_restricted: "提示: 当前受限制，选择 1) 打补丁 可恢复下载",
+    hint_partial: "提示: 部分已补丁，选择 1) 打补丁 恢复剩余内容",
     hint_patched: "提示: 下载功能已恢复，无需其他操作",
     hint_unknown: "提示: 无法识别该文件，未做任何修改；如路径不对请用 5) 指定 PCL 路径",
     controls_raw: "↑↓ 或数字选择，Enter 确认，Esc 退出",
     controls_line: "输入数字选择，0 退出",
     identify_ok: "识别: PCL2（匹配特征 {} 项）",
+    identify_version: "适配版本: {}",
     err_not_pcl: "该文件不是 PCL2 主程序，已取消操作",
     err_damaged: "特征块状态异常（既非原版也非补丁形态），已拒绝修改；请用 .bak 备份还原或重新获取文件",
     hint_pcl_mismatch: "提示: 这是 PCL2，但未找到适配的特征块（版本可能过新或过旧），未做任何修改",
@@ -215,6 +277,9 @@ pub const EN: Messages = Messages {
     fail_tag: "[Fail]",
     target: "Target file: {}",
     state: "Current state: {}",
+    ilpatch_start: "Restoring modpack install flow...",
+    ilpatch_done: "Modpack install flow restored",
+    state_partial: "Partially patched (new patch points pending)",
     state_patched: "Patched (vanilla download restored)",
     state_restricted: "Restricted (vanilla behavior)",
     state_unknown: "Unrecognized (PCL version may be unsupported)",
@@ -253,11 +318,13 @@ pub const EN: Messages = Messages {
     backup_yes: "exists",
     backup_no: "none (created automatically on first patch)",
     hint_restricted: "Tip: currently restricted - choose 1) Apply patch to restore downloads",
+    hint_partial: "Tip: partially patched - choose 1) Apply patch to finish",
     hint_patched: "Tip: downloads are restored; no action needed",
     hint_unknown: "Tip: file unrecognized, nothing modified; if the path is wrong use 5) Set PCL path",
     controls_raw: "Arrows or digits to select, Enter to confirm, Esc to exit",
     controls_line: "Type a number to select, 0 to exit",
     identify_ok: "Identified: PCL2 ({} features matched)",
+    identify_version: "Supported version: {}",
     err_not_pcl: "This file is not a PCL2 executable; operation cancelled",
     err_damaged: "The signature block is in an unexpected state (neither original nor patched); refusing to modify. Restore from the .bak backup or re-obtain the file",
     hint_pcl_mismatch: "Tip: this is PCL2, but no compatible signature block was found (version may be too new or too old); nothing was modified",
@@ -274,6 +341,7 @@ pub fn state_message(state: PatchState, lang: Lang) -> &'static str {
     let m = messages(lang);
     match state {
         PatchState::Patched => m.state_patched,
+        PatchState::Partial => m.state_partial,
         PatchState::Restricted => m.state_restricted,
         PatchState::Unknown => m.state_unknown,
     }
@@ -288,6 +356,7 @@ pub enum PatchError {
     AlreadyPatched,
     AlreadyOriginal,
     VerifyFailed,
+    Structural(String),
 }
 
 impl std::fmt::Display for PatchError {
@@ -318,12 +387,9 @@ impl PatchError {
             PatchError::AlreadyPatched => m.err_already_patched.to_string(),
             PatchError::AlreadyOriginal => m.err_already_original.to_string(),
             PatchError::VerifyFailed => m.err_verify.to_string(),
+            PatchError::Structural(e) => e.clone(),
         }
     }
-}
-
-fn matches(data: &[u8], at: usize, pattern: &[u8]) -> bool {
-    at + pattern.len() <= data.len() && &data[at..at + pattern.len()] == pattern
 }
 
 pub fn find(data: &[u8], needle: &[u8]) -> Option<usize> {
@@ -351,33 +417,27 @@ pub fn count(data: &[u8], needle: &[u8]) -> usize {
 }
 
 pub fn locate(data: &[u8]) -> Option<usize> {
-    if let Some(p) = find(data, &ORIG) {
-        return Some(p);
-    }
-    let t = find(data, &TAIL)?;
-    if t >= ORIG.len() {
-        Some(t - ORIG.len())
-    } else {
-        None
-    }
+    let (_, s) = analyze(data).ok()?;
+    let p1 = s.points.iter().find(|p| p.name == "LoaderInit")?;
+    p1.positions.first().map(|&pos| p1.code_off + pos)
 }
 
 pub fn state_of(data: &[u8]) -> PatchState {
-    match locate(data) {
-        Some(p) if matches(data, p, &NEW) => PatchState::Patched,
-        Some(p) if matches(data, p, &ORIG) => PatchState::Restricted,
-        _ => PatchState::Unknown,
+    match analyze(data) {
+        Ok((_, s)) => patcher::state_of(&s),
+        Err(_) => PatchState::Unknown,
     }
 }
-
-pub const PCL_IDENTIFY_THRESHOLD: u32 = 50;
 
 #[derive(Debug, Clone)]
 pub struct Identification {
     pub score: u32,
     pub is_pcl: bool,
     pub reasons: Vec<&'static str>,
+    pub version: Option<&'static str>,
 }
+
+pub const PCL_IDENTIFY_THRESHOLD: u32 = 50;
 
 fn find_utf16le(data: &[u8], text: &str) -> bool {
     let pattern: Vec<u8> = text
@@ -422,43 +482,56 @@ pub fn identify(data: &[u8]) -> Identification {
         score,
         is_pcl: score >= PCL_IDENTIFY_THRESHOLD,
         reasons,
+        version: analyze(data).ok().and_then(|(_, s)| {
+            let hit = s.points.iter().any(|p| {
+                p.name == "LoaderInit" && p.state != patcher::PointState::NotApplicable
+            });
+            if !hit {
+                None
+            } else if s.v1_set {
+                Some("2.99.0.1+")
+            } else {
+                Some("2.99.0.0+")
+            }
+        }),
     }
 }
 
-fn check_anchors(data: &[u8]) -> Result<(), PatchError> {
-    if count(data, &ORIG) > 1 || count(data, &NEW) > 1 || count(data, &TAIL) > 1 {
-        return Err(PatchError::AmbiguousPattern);
-    }
-    Ok(())
-}
-
-pub fn apply_patch(data: &mut [u8]) -> Result<(), PatchError> {
-    check_anchors(data)?;
-    let p = locate(data).ok_or(PatchError::PatternNotFound)?;
-    if matches(data, p, &NEW) {
-        return Err(PatchError::AlreadyPatched);
-    }
-    if !matches(data, p, &ORIG) {
+pub fn apply_patch(data: &mut Vec<u8>) -> Result<(), PatchError> {
+    let (mut img, s) = analyze(data).map_err(|_| PatchError::PatternNotFound)?;
+    if s.points.iter().any(|p| p.state == patcher::PointState::Changed) {
         return Err(PatchError::PatternDamaged);
     }
-    data[p..p + NEW.len()].copy_from_slice(&NEW);
-    if state_of(data) != PatchState::Patched {
+    if patcher::state_of(&s) == PatchState::Patched {
+        return Err(PatchError::AlreadyPatched);
+    }
+    if !s.points.iter().any(|p| p.state == patcher::PointState::Pending) {
+        return Err(PatchError::AlreadyPatched);
+    }
+    patcher::apply(&mut img, &s).map_err(PatchError::Structural)?;
+    *data = img.data;
+    let (_, s2) = analyze(data).map_err(|_| PatchError::VerifyFailed)?;
+    if s2.points.iter().any(|p| p.state == patcher::PointState::Pending) {
         return Err(PatchError::VerifyFailed);
     }
     Ok(())
 }
 
-pub fn restore(data: &mut [u8]) -> Result<(), PatchError> {
-    check_anchors(data)?;
-    let p = locate(data).ok_or(PatchError::PatternNotFound)?;
-    if matches(data, p, &ORIG) {
-        return Err(PatchError::AlreadyOriginal);
-    }
-    if !matches(data, p, &NEW) {
+pub fn restore(data: &mut Vec<u8>) -> Result<(), PatchError> {
+    let (mut img, s) = analyze(data).map_err(|_| PatchError::PatternNotFound)?;
+    if s.points.iter().any(|p| p.state == patcher::PointState::Changed) {
         return Err(PatchError::PatternDamaged);
     }
-    data[p..p + ORIG.len()].copy_from_slice(&ORIG);
-    if state_of(data) != PatchState::Restricted {
+    if patcher::state_of(&s) == PatchState::Restricted {
+        return Err(PatchError::AlreadyOriginal);
+    }
+    if !s.points.iter().any(|p| p.state.is_done()) {
+        return Err(PatchError::AlreadyOriginal);
+    }
+    patcher::restore(&mut img, &s).map_err(PatchError::Structural)?;
+    *data = img.data;
+    let (_, s2) = analyze(data).map_err(|_| PatchError::VerifyFailed)?;
+    if s2.points.iter().any(|p| p.state.is_done()) {
         return Err(PatchError::VerifyFailed);
     }
     Ok(())

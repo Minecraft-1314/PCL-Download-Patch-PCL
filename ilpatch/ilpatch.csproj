@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>ilpatch</AssemblyName>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>netcoreapp9.0</TargetFramework>
+    <LangVersion>11.0</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <RootNamespace />
+    <NoWarn>$(NoWarn);CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Remove="ilpatch.ref_pcl.bin" />
+    <EmbeddedResource Include="ilpatch.ref_pcl.bin" LogicalName="ilpatch.ref_pcl.bin" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="dnlib" Version="4.4.0" />
+  </ItemGroup>
+</Project>

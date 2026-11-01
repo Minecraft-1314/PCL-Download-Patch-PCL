@@ -1,6 +1,8 @@
 target/
 dist/
 out/
+ilpatch/bin/
+ilpatch/obj/
 .idea/
 .vs/
 .vscode/

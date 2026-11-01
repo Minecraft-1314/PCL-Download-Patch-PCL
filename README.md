@@ -54,8 +54,13 @@ PCL2 为遵守相关法律法规移除了「下载原版游戏」功能，两个
 | 5 | `PageResource.set_PageType` | 整合包页「搜索安装 Mod 包」按钮无条件 Collapsed | 按 `PageType==2` 显示 |
 | 6 | `PageSelectRight.McInstanceListUI` | 空版本列表的下载按钮在两个分支里均 Collapsed | 两个分支均恢复显示 |
 | 7 | `PageSelectLeft.McFolderListUI` | 实例列表的「整合包安装」按钮整句 `PanList.Children.Add` 被删除（22 字节） | 等长借用紧随其后的间隔元素 Add 槽位改放该按钮；被删指令的令牌以跳板形式嵌入 nop 区供无损还原 |
+| 8 | `PageDownloadResourceDetail.InstallOrSave_Click` | 整合包安装流程被官方摘除，版本行点击无处理入口 | 版本行点击按 `ResourceVersion.ResourceType` 分流：整合包（=2）走下载并安装整合包，Mod / 数据包 / 资源包 / 光影包走 `Save_Click` 下载资源文件；「另存为」按钮始终为 `Save_Click` |
 
 所有修改均为等长 IL 替换，不改变文件大小与后续所有偏移。修改点是 IL 而非机器码。
+
+## 整合包安装流程的适用范围
+
+补丁点 8 由内置的 `ilpatch` 组件（dnlib 实现）完成。整合包安装流程只在版本条目本身的资源类型为整合包（`ResourceTypes = 2`）时启用，Mod、数据包、资源包、光影包的版本条目点击后走正常的资源文件下载，不会再触发整合包安装。
 
 ## 还原原理（无损往返）
 

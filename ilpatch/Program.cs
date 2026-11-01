@@ -1329,7 +1329,6 @@ internal static class Program
 		Instruction branchNotModpack = Instruction.Create(OpCodes.Brfalse, Instruction.Create(OpCodes.Nop));
 		Instruction branchSave = Instruction.Create(OpCodes.Bne_Un, Instruction.Create(OpCodes.Nop));
 		Instruction savePath = Instruction.Create(OpCodes.Ldarg_0);
-		instructions.Add(Instruction.Create(OpCodes.Ldarg_0));
 		instructions.Add(Instruction.Create(OpCodes.Ldarg_1));
 		instructions.Add(Instruction.Create(OpCodes.Castclass, typeDefOrRef));
 		instructions.Add(Instruction.Create(OpCodes.Callvirt, getTag));
@@ -1355,6 +1354,16 @@ internal static class Program
 		branchNotModpack.Operand = savePath;
 		branchSave.Operand = savePath;
 		typeDef6.Methods.Add(methodDefUser5);
+		string stackError = CheckStackBalance(methodDefUser5);
+		if (stackError != null)
+		{
+			return Fail("InstallOrSave_Click IL invalid: " + stackError);
+		}
+		stackError = CheckStackBalance(methodDefUser6);
+		if (stackError != null)
+		{
+			return Fail("SaveForward_Click IL invalid: " + stackError);
+		}
 		MethodDef methodDef10 = typeDef6.FindMethod("InitializeStackResourceVersions");
 		if (methodDef10 != null && methodDef10.HasBody)
 		{
@@ -1525,6 +1534,120 @@ internal static class Program
 			}
 		}
 		return null;
+	}
+
+	private static string? CheckStackBalance(MethodDef method)
+	{
+		if (!method.HasBody)
+		{
+			return "no body";
+		}
+		int stack = 0;
+		int max = 0;
+		foreach (Instruction instruction in method.Body.Instructions)
+		{
+			int delta;
+			if (!TryStackDelta(instruction, out delta))
+			{
+				return "unhandled opcode " + instruction.OpCode + " at " + instruction.Offset;
+			}
+			stack += delta;
+			if (stack < 0)
+			{
+				return "stack underflow at " + instruction.Offset + " (" + instruction.OpCode + ")";
+			}
+			if (stack > max)
+			{
+				max = stack;
+			}
+		}
+		if (stack != 0)
+		{
+			return "stack not empty at end: " + stack;
+		}
+		if (method.Body.MaxStack < max)
+		{
+			return "maxstack too small: declared=" + method.Body.MaxStack + " needed=" + max;
+		}
+		return null;
+	}
+
+	private static bool TryStackDelta(Instruction instruction, out int delta)
+	{
+		delta = 0;
+		switch (instruction.OpCode.Code)
+		{
+		case Code.Ldarg_0:
+		case Code.Ldarg_1:
+		case Code.Ldarg_2:
+		case Code.Ldarg_3:
+		case Code.Ldloc_0:
+		case Code.Ldloc_1:
+		case Code.Ldloc_2:
+		case Code.Ldloc_3:
+		case Code.Ldnull:
+		case Code.Ldc_I4_0:
+		case Code.Ldc_I4_1:
+		case Code.Ldc_I4_2:
+		case Code.Ldc_I4_3:
+		case Code.Ldc_I4_4:
+		case Code.Ldc_I4_5:
+		case Code.Ldc_I4_6:
+		case Code.Ldc_I4_7:
+		case Code.Ldc_I4_8:
+		case Code.Dup:
+			delta = 1;
+			return true;
+		case Code.Stloc_0:
+		case Code.Stloc_1:
+		case Code.Stloc_2:
+		case Code.Stloc_3:
+			delta = 0;
+			return true;
+		case Code.Pop:
+			delta = -1;
+			return true;
+		case Code.Castclass:
+			delta = 0;
+			return true;
+		case Code.Isinst:
+			delta = 0;
+			return true;
+		case Code.Ldfld:
+		case Code.Ldsfld:
+			delta = 0;
+			return true;
+		case Code.Ret:
+			delta = 0;
+			return true;
+		case Code.Brfalse:
+		case Code.Brtrue:
+			delta = -1;
+			return true;
+		case Code.Bne_Un:
+		case Code.Beq:
+			delta = -2;
+			return true;
+		case Code.Call:
+		case Code.Callvirt:
+			{
+				int consumed = 0;
+				IMethod target = instruction.Operand as IMethod;
+				if (target == null || target.MethodSig == null)
+				{
+					return false;
+				}
+				consumed += target.MethodSig.Params.Count;
+				if (target.MethodSig.HasThis)
+				{
+					consumed++;
+				}
+				delta = -consumed;
+				return true;
+			}
+		default:
+			return false;
+		}
 	}
 
 	private static int Main(string[] args)
